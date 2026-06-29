@@ -9,6 +9,7 @@ dependencies = [
     "numpy",
     "huggingface-hub",
     "onnx>=1.22.0",
+    "onnxsim>=0.6.5",
 ]
 
 [project.scripts]

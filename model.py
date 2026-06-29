@@ -7,6 +7,7 @@ from huggingface_hub import hf_hub_download
 # Full-precision model for GPU — float32 RGB, CUDA EP compatible
 GPU_MODEL_REPO = "Carve/LaMa-ONNX"
 GPU_MODEL_FILE = "lama_fp32.onnx"
+GPU_MODEL_FILE_SIM = "lama_fp32_simplified.onnx"  # constant-folded, ~10% faster
 
 # Quantized model for CPU — smaller, faster on CPU, expects BGR
 CPU_MODEL_REPO = "opencv/inpainting_lama"
@@ -36,11 +37,33 @@ def _download(repo: str, filename: str) -> str:
     return local_path
 
 
+def _simplify_gpu_model(src_path: str) -> str:
+    """Constant-fold the GPU model on first use to reduce CPU/GPU Memcpy nodes."""
+    dst_path = os.path.join(MODELS_DIR, GPU_MODEL_FILE_SIM)
+    if os.path.exists(dst_path):
+        return dst_path
+    print("Optimising model (one-time, takes ~30s)...")
+    import onnx
+    from onnxsim import simplify
+    model = onnx.load(src_path)
+    simplified, ok = simplify(
+        model,
+        test_input_shapes={"image": [1, 3, 512, 512], "mask": [1, 1, 512, 512]},
+    )
+    if ok:
+        onnx.save(simplified, dst_path)
+        print("Optimisation complete.")
+        return dst_path
+    print("Optimisation check failed, using original model.")
+    return src_path
+
+
 def load_session() -> InpaintSession:
     cuda_available = "CUDAExecutionProvider" in ort.get_available_providers()
 
     if cuda_available:
-        model_path = _download(GPU_MODEL_REPO, GPU_MODEL_FILE)
+        base_path = _download(GPU_MODEL_REPO, GPU_MODEL_FILE)
+        model_path = _simplify_gpu_model(base_path)
         providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
         use_bgr = False
         output_scale = 1.0
