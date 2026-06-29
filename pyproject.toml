@@ -1,0 +1,15 @@
+[project]
+name = "remover"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "pyside6",
+    "onnxruntime-gpu==1.26.0",
+    "pillow",
+    "numpy",
+    "huggingface-hub",
+    "onnx>=1.22.0",
+]
+
+[project.scripts]
+remover = "app:main"
