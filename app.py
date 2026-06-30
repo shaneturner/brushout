@@ -174,8 +174,12 @@ class Canvas(QGraphicsView):
         # clear() destroys C++ objects; drop Python refs so they aren't used again
         self._image_item = None
         self._mask_item = None
+        self._cursor_ring = None
         self._hint_label.setVisible(self._image_pil is None)
         if self._image_pil is None:
+            self._scene.setSceneRect(QRectF())
+            self.resetTransform()
+            self._hint_label.raise_()
             return
 
         pixmap = pil_to_qpixmap(self._image_pil)
@@ -231,6 +235,12 @@ class Canvas(QGraphicsView):
             return
         self._mask_arr = np.zeros((self._image_pil.height, self._image_pil.width), dtype=np.uint8)
         self._refresh_mask_overlay()
+
+    def close_image(self):
+        self._image_pil = None
+        self._mask_arr = None
+        self._undo_stack.clear()
+        self._rebuild_scene()
 
     # ── Brush drawing ────────────────────────────────────────────────────
 
@@ -344,6 +354,8 @@ class Canvas(QGraphicsView):
             super().keyReleaseEvent(event)
 
     def wheelEvent(self, event):
+        if self._image_pil is None:
+            return
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
         cursor_pos = event.position().toPoint()
         scene_pos = self.mapToScene(cursor_pos)
@@ -519,6 +531,11 @@ class MainWindow(QMainWindow):
         paste_act.triggered.connect(self._paste_image)
         tb.addAction(paste_act)
 
+        close_act = QAction("Close Image", self)
+        close_act.setShortcut(QKeySequence.StandardKey.Close)
+        close_act.triggered.connect(self._close_image)
+        tb.addAction(close_act)
+
         save_act = QAction("Save", self)
         save_act.setShortcut(QKeySequence.StandardKey.Save)
         save_act.triggered.connect(self._save_image)
@@ -591,6 +608,10 @@ class MainWindow(QMainWindow):
         )
 
     # ── Actions ──────────────────────────────────────────────────────────
+
+    def _close_image(self):
+        self._canvas.close_image()
+        self._status.setText("Open an image to get started.")
 
     def _on_image_dropped(self, path: str):
         self._canvas.load_image(path)
