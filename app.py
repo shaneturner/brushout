@@ -6,10 +6,10 @@ import sys
 import threading
 import numpy as np
 from PIL import Image
-from PySide6.QtCore import Qt, QPoint, QRectF, QSize, QTimer
+from PySide6.QtCore import Qt, QPoint, QRectF, QSize, QTimer, Signal
 from PySide6.QtGui import (
     QAction, QColor, QCursor, QImage, QKeySequence,
-    QPainter, QPen, QPixmap,
+    QPainter, QPen, QPixmap, QGuiApplication,
 )
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QGraphicsEllipseItem, QGraphicsPixmapItem,
@@ -25,11 +25,7 @@ MAX_UNDO = 10
 
 def _default_dir() -> str:
     """Return Windows user home in WSL, empty string otherwise."""
-    try:
-        with open("/proc/version") as f:
-            if "microsoft" not in f.read().lower():
-                return ""
-    except OSError:
+    if not _IN_WSL:
         return ""
     win_home = os.environ.get("USERPROFILE", "")
     if win_home:
@@ -37,6 +33,30 @@ def _default_dir() -> str:
         if result.returncode == 0:
             return result.stdout.strip()
     return "/mnt/c"
+
+
+def _is_wsl() -> bool:
+    try:
+        with open("/proc/version") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
+_IN_WSL = _is_wsl()
+
+
+def _drop_path(url) -> str:
+    """Convert a dropped QUrl to a filesystem path, handling WSL Windows paths."""
+    path = url.toLocalFile()
+    # In WSL, Windows Explorer can drop Windows-style paths (C:\...) instead of /mnt/c/...
+    if not path:
+        path = url.toString()
+    if _IN_WSL and len(path) >= 2 and path[1] == ':':
+        result = subprocess.run(["wslpath", path], capture_output=True, text=True)
+        if result.returncode == 0:
+            return result.stdout.strip()
+    return path
 
 
 def pil_to_qpixmap(img: Image.Image) -> QPixmap:
@@ -55,8 +75,42 @@ def qpixmap_to_pil(pixmap: QPixmap) -> Image.Image:
 
 
 class Canvas(QGraphicsView):
+    image_dropped = Signal(str)
+
+    _HINT_WSL = """
+        <div style='text-align:center; font-family:sans-serif;'>
+          <p style='font-size:13pt; color:#c8c8c8; margin:0 0 6px 0;'>No image loaded</p>
+          <p style='font-size:10pt; color:#999; margin:0 0 16px 0;'>
+            <span style='color:#ddd;'>Ctrl+O</span> &nbsp;open file dialog
+            &nbsp;&nbsp;&nbsp;
+            <span style='color:#ddd;'>Ctrl+V</span> &nbsp;paste image
+          </p>
+          <p style='font-size:10pt; color:#ffbe50; margin:0 0 6px 0;'>
+            <b>Running in WSL</b> &mdash; drag &amp; drop from Windows Explorer is not supported
+          </p>
+          <p style='font-size:10pt; color:#999; line-height:1.7; margin:0;'>
+            Use <span style='color:#ddd;'>Ctrl+V</span> to load an image from Windows:<br>
+            &bull; &nbsp;Ctrl+C a file in Explorer &rarr; Ctrl+V here<br>
+            &bull; &nbsp;Screenshot with <span style='color:#ddd;'>Win+Shift+S</span> &rarr; Ctrl+V here<br>
+            &bull; &nbsp;Copy an image in Photos&nbsp;/&nbsp;browser&nbsp;/&nbsp;Paint &rarr; Ctrl+V here
+          </p>
+        </div>"""
+
+    _HINT_DEFAULT = """
+        <div style='text-align:center; font-family:sans-serif;'>
+          <p style='font-size:13pt; color:#c8c8c8; margin:0 0 6px 0;'>No image loaded</p>
+          <p style='font-size:10pt; color:#999; margin:0;'>
+            <span style='color:#ddd;'>Ctrl+O</span> &nbsp;open file dialog
+            &nbsp;&nbsp;&nbsp;
+            <span style='color:#ddd;'>Ctrl+V</span> &nbsp;paste image
+            &nbsp;&nbsp;&nbsp;
+            drag &amp; drop a file here
+          </p>
+        </div>"""
+
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setAcceptDrops(True)
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -85,6 +139,25 @@ class Canvas(QGraphicsView):
         self.setBackgroundBrush(QColor(40, 40, 40))
         self.viewport().setMouseTracking(True)
 
+        self._hint_label = QLabel(self.viewport())
+        self._hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._hint_label.setTextFormat(Qt.TextFormat.RichText)
+        self._hint_label.setWordWrap(True)
+        self._hint_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._hint_label.setStyleSheet(
+            "background: transparent;"
+            "border: 1px dashed #555;"
+            "border-radius: 8px;"
+        )
+        self._hint_label.setText(self._HINT_WSL if _IN_WSL else self._HINT_DEFAULT)
+        self._hint_label.show()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        m = 30
+        r = self.viewport().rect()
+        self._hint_label.setGeometry(r.adjusted(m, m, -m, -m))
+
     # ── Image management ─────────────────────────────────────────────────
 
     def load_image(self, path: str):
@@ -101,6 +174,7 @@ class Canvas(QGraphicsView):
         # clear() destroys C++ objects; drop Python refs so they aren't used again
         self._image_item = None
         self._mask_item = None
+        self._hint_label.setVisible(self._image_pil is None)
         if self._image_pil is None:
             return
 
@@ -282,6 +356,34 @@ class Canvas(QGraphicsView):
             self.verticalScrollBar().value() + new_vp.y() - cursor_pos.y()
         )
 
+    # ── Drag and drop ────────────────────────────────────────────────────
+
+    _IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.bmp', '.webp')
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            if any(
+                _drop_path(u).lower().endswith(self._IMAGE_EXTS)
+                for u in event.mimeData().urls()
+            ):
+                event.acceptProposedAction()
+                return
+        event.ignore()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            path = _drop_path(url)
+            if path.lower().endswith(self._IMAGE_EXTS):
+                self.image_dropped.emit(path)
+                break
+        event.acceptProposedAction()
+
     # ── Properties ───────────────────────────────────────────────────────
 
     @property
@@ -316,6 +418,72 @@ class Canvas(QGraphicsView):
         self._mask_arr = np.zeros((img.height, img.width), dtype=np.uint8)
         self._rebuild_scene()
 
+    def paste_from_clipboard(self) -> str | None:
+        """
+        Try to load an image from the clipboard.
+        Returns a status string on success, None if clipboard had nothing useful.
+        """
+        clipboard = QGuiApplication.clipboard()
+        mime = clipboard.mimeData()
+
+        # 1. Image pixels (screenshot, copy from browser/viewer, etc.)
+        if mime.hasImage():
+            qimg = clipboard.image()
+            if not qimg.isNull():
+                qimg = qimg.convertToFormat(QImage.Format.Format_RGB888)
+                w, h = qimg.width(), qimg.height()
+                arr = np.frombuffer(qimg.bits(), dtype=np.uint8).reshape((h, w, 3)).copy()
+                self._image_pil = Image.fromarray(arr, "RGB")
+                self._mask_arr = np.zeros((h, w), dtype=np.uint8)
+                self._undo_stack.clear()
+                self._rebuild_scene()
+                QTimer.singleShot(0, lambda: self.fitInView(
+                    self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio
+                ))
+                return "Pasted image from clipboard."
+
+        # 2. File URLs (text/uri-list) — works on native platforms; may work in WSLg
+        if mime.hasUrls():
+            for url in mime.urls():
+                path = _drop_path(url)
+                if path.lower().endswith(self._IMAGE_EXTS) and os.path.isfile(path):
+                    self.load_image(path)
+                    return f"Loaded: {path}"
+
+        # 3. File path as plain text (e.g. copied from Explorer's address bar)
+        if mime.hasText():
+            text = mime.text().strip().strip('"')
+            if _IN_WSL and len(text) >= 2 and text[1] == ':':
+                result = subprocess.run(["wslpath", text], capture_output=True, text=True)
+                if result.returncode == 0:
+                    text = result.stdout.strip()
+            if text.lower().endswith(self._IMAGE_EXTS) and os.path.isfile(text):
+                self.load_image(text)
+                return f"Loaded: {text}"
+
+        # 4. WSL: read CF_HDROP directly via PowerShell (WSLg doesn't bridge file handles)
+        if _IN_WSL:
+            try:
+                ps = subprocess.run(
+                    ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                     "$f = Get-Clipboard -Format FileDropList; if ($f) { $f | % { $_.FullName } }"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                for line in ps.stdout.splitlines():
+                    win_path = line.strip()
+                    if not win_path:
+                        continue
+                    wsl = subprocess.run(["wslpath", win_path], capture_output=True, text=True)
+                    if wsl.returncode == 0:
+                        linux_path = wsl.stdout.strip()
+                        if linux_path.lower().endswith(self._IMAGE_EXTS) and os.path.isfile(linux_path):
+                            self.load_image(linux_path)
+                            return f"Loaded: {linux_path}"
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                pass
+
+        return None
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -333,6 +501,7 @@ class MainWindow(QMainWindow):
         self._status = QLabel("Open an image to get started.")
         threading.Thread(target=self._preload_models, daemon=True).start()
         self.statusBar().addWidget(self._status)
+        self._canvas.image_dropped.connect(self._on_image_dropped)
 
     def _build_toolbar(self):
         tb = QToolBar("Tools", self)
@@ -344,6 +513,11 @@ class MainWindow(QMainWindow):
         open_act.setShortcut(QKeySequence.StandardKey.Open)
         open_act.triggered.connect(self._open_image)
         tb.addAction(open_act)
+
+        paste_act = QAction("Paste Image", self)
+        paste_act.setShortcut(QKeySequence.StandardKey.Paste)
+        paste_act.triggered.connect(self._paste_image)
+        tb.addAction(paste_act)
 
         save_act = QAction("Save", self)
         save_act.setShortcut(QKeySequence.StandardKey.Save)
@@ -417,6 +591,17 @@ class MainWindow(QMainWindow):
         )
 
     # ── Actions ──────────────────────────────────────────────────────────
+
+    def _on_image_dropped(self, path: str):
+        self._canvas.load_image(path)
+        self._status.setText(f"Loaded: {path}  |  Left-drag to paint mask, Right-drag to erase")
+
+    def _paste_image(self):
+        msg = self._canvas.paste_from_clipboard()
+        if msg:
+            self._status.setText(f"{msg}  |  Left-drag to paint mask, Right-drag to erase")
+        else:
+            self._status.setText("Nothing to paste — copy an image or a file path first.")
 
     def _open_image(self):
         path, _ = QFileDialog.getOpenFileName(
