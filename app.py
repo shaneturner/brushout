@@ -3,6 +3,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import numpy as np
 from PIL import Image
 from PySide6.QtCore import Qt, QPoint, QRectF, QSize, QTimer
@@ -11,12 +12,12 @@ from PySide6.QtGui import (
     QPainter, QPen, QPixmap,
 )
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QGraphicsPixmapItem,
+    QApplication, QFileDialog, QGraphicsEllipseItem, QGraphicsPixmapItem,
     QGraphicsScene, QGraphicsView, QLabel, QMainWindow,
-    QMessageBox, QSlider, QToolBar, QWidget,
+    QMessageBox, QPushButton, QSlider, QToolBar, QWidget,
 )
 
-from model import load_session
+from model import load_session, ModelType
 from inpaint import inpaint
 
 MAX_UNDO = 10
@@ -78,9 +79,11 @@ class Canvas(QGraphicsView):
         self._panning = False
         self._pan_start: QPoint | None = None
         self._space_held = False
+        self._cursor_ring: QGraphicsEllipseItem | None = None
 
         self.setMinimumSize(600, 400)
         self.setBackgroundBrush(QColor(40, 40, 40))
+        self.viewport().setMouseTracking(True)
 
     # ── Image management ─────────────────────────────────────────────────
 
@@ -107,6 +110,16 @@ class Canvas(QGraphicsView):
 
         self._refresh_mask_overlay()
         self._scene.setSceneRect(QRectF(pixmap.rect()))
+
+        pen = QPen(QColor(255, 255, 255, 200))
+        pen.setCosmetic(True)
+        pen.setWidthF(1.5)
+        self._cursor_ring = QGraphicsEllipseItem()
+        self._cursor_ring.setPen(pen)
+        self._cursor_ring.setBrush(Qt.BrushStyle.NoBrush)
+        self._cursor_ring.setZValue(3)
+        self._cursor_ring.hide()
+        self._scene.addItem(self._cursor_ring)
 
     def _refresh_mask_overlay(self):
         if self._mask_arr is None or self._image_pil is None:
@@ -178,6 +191,16 @@ class Canvas(QGraphicsView):
         self._last_pos = pos
         self._refresh_mask_overlay()
 
+    def _move_cursor_ring(self, viewport_pos):
+        if self._cursor_ring is None or self._panning or self._space_held:
+            if self._cursor_ring:
+                self._cursor_ring.hide()
+            return
+        sp = self.mapToScene(viewport_pos)
+        r = self._brush_size / 2.0
+        self._cursor_ring.setRect(sp.x() - r, sp.y() - r, r * 2, r * 2)
+        self._cursor_ring.show()
+
     # ── Mouse events ─────────────────────────────────────────────────────
 
     def mousePressEvent(self, event):
@@ -214,6 +237,7 @@ class Canvas(QGraphicsView):
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
             return
 
+        self._move_cursor_ring(event.position().toPoint())
         if self._drawing:
             self._stroke_to(self._scene_pos(event), erase=self._erasing)
 
@@ -224,6 +248,11 @@ class Canvas(QGraphicsView):
         if self._panning:
             self._panning = False
             self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+
+    def leaveEvent(self, event):
+        if self._cursor_ring:
+            self._cursor_ring.hide()
+        super().leaveEvent(event)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
@@ -262,6 +291,8 @@ class Canvas(QGraphicsView):
     @brush_size.setter
     def brush_size(self, value: int):
         self._brush_size = value
+        cursor_vp = self.mapFromGlobal(self.cursor().pos())
+        self._move_cursor_ring(cursor_vp)
 
     @property
     def has_image(self) -> bool:
@@ -292,12 +323,15 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Object Remover")
         self.resize(1100, 750)
 
-        self._session = None
+        self._sessions: dict[ModelType, object] = {}
+        self._active_model = ModelType.LAMA
+        self._model_btn: QPushButton | None = None
         self._canvas = Canvas(self)
         self.setCentralWidget(self._canvas)
 
         self._build_toolbar()
         self._status = QLabel("Open an image to get started.")
+        threading.Thread(target=self._preload_models, daemon=True).start()
         self.statusBar().addWidget(self._status)
 
     def _build_toolbar(self):
@@ -339,10 +373,48 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
+        self._model_btn = QPushButton(self._model_label())
+        self._model_btn.setToolTip("Switch inpainting model")
+        self._model_btn.clicked.connect(self._toggle_model)
+        tb.addWidget(self._model_btn)
+
+        tb.addSeparator()
+
         remove_act = QAction("Remove Object", self)
         remove_act.setShortcut("Return")
         remove_act.triggered.connect(self._run_inpaint)
         tb.addAction(remove_act)
+
+    # ── Model preloading ─────────────────────────────────────────────────
+
+    def _preload_models(self):
+        for model_type in (ModelType.LAMA, ModelType.MIGAN):
+            try:
+                session = load_session(model_type)
+                QTimer.singleShot(0, lambda s=session, t=model_type: self._store_session(t, s))
+            except Exception as e:
+                print(f"Preload failed for {model_type.value}: {e}")
+
+    def _store_session(self, model_type: ModelType, session):
+        self._sessions[model_type] = session
+
+    # ── Model selection ──────────────────────────────────────────────────
+
+    def _model_label(self) -> str:
+        return {
+            ModelType.LAMA:  "Model: LaMa",
+            ModelType.MIGAN: "Model: MI-GAN",
+        }[self._active_model]
+
+    def _toggle_model(self):
+        self._active_model = (
+            ModelType.MIGAN if self._active_model == ModelType.LAMA else ModelType.LAMA
+        )
+        self._model_btn.setText(self._model_label())
+        self._status.setText(
+            f"Switched to {self._model_label().replace('Model: ', '')}. "
+            "Model will load on next removal."
+        )
 
     # ── Actions ──────────────────────────────────────────────────────────
 
@@ -374,11 +446,12 @@ class MainWindow(QMainWindow):
             self._status.setText("Paint a mask over the object to remove first.")
             return
 
-        if self._session is None:
-            self._status.setText("Loading model (first run downloads ~100MB)...")
+        if self._active_model not in self._sessions:
+            model_name = self._model_label().replace("Model: ", "")
+            self._status.setText(f"Loading {model_name} model...")
             QApplication.processEvents()
             try:
-                self._session = load_session()
+                self._sessions[self._active_model] = load_session(self._active_model)
             except Exception as e:
                 QMessageBox.critical(self, "Model Load Error", str(e))
                 return
@@ -387,7 +460,8 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
 
         try:
-            result = inpaint(self._session, self._canvas.get_image(), self._canvas.get_mask())
+            session = self._sessions[self._active_model]
+            result = inpaint(session, self._canvas.get_image(), self._canvas.get_mask())
             self._canvas.set_image(result)
             self._status.setText("Done. Paint another mask to continue, or Save.")
         except Exception as e:

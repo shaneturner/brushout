@@ -1,34 +1,42 @@
 import os
 from dataclasses import dataclass
+from enum import Enum
 import numpy as np
 import onnxruntime as ort
 from huggingface_hub import hf_hub_download
 
-# Full-precision model for GPU — float32 RGB, CUDA EP compatible
-GPU_MODEL_REPO = "Carve/LaMa-ONNX"
-GPU_MODEL_FILE = "lama_fp32.onnx"
-GPU_MODEL_FILE_SIM = "lama_fp32_simplified.onnx"  # constant-folded, ~10% faster
-
-# Quantized model for CPU — smaller, faster on CPU, expects BGR
-CPU_MODEL_REPO = "opencv/inpainting_lama"
-CPU_MODEL_FILE = "inpainting_lama_2025jan.onnx"
-
 MODELS_DIR = os.path.join(os.path.dirname(__file__), "models")
+
+
+class ModelType(Enum):
+    LAMA  = "lama"
+    MIGAN = "migan"
+
+
+# LaMa — full-precision float32 RGB, fixed 512×512, GPU-friendly
+_LAMA_REPO = "Carve/LaMa-ONNX"
+_LAMA_FILE = "lama_fp32.onnx"
+_LAMA_FILE_SIM = "lama_fp32_simplified.onnx"
+
+# MI-GAN — uint8 RGB, dynamic size, all pre/post-processing built-in
+_MIGAN_REPO = "andraniksargsyan/migan"
+_MIGAN_FILE = "migan_pipeline_v2.onnx"
 
 
 @dataclass
 class InpaintSession:
     session: ort.InferenceSession
-    use_bgr: bool        # opencv model needs BGR; Carve model needs RGB
-    output_scale: float  # opencv outputs [0,255]; Carve outputs [0,1]
+    model_type: ModelType
+    # LaMa-specific: Carve model is RGB [0,255] out; opencv CPU model is BGR [0,255] out
+    use_bgr: bool = False
 
 
-def _download(repo: str, filename: str) -> str:
+def _download(repo: str, filename: str, size_hint: str = "") -> str:
     os.makedirs(MODELS_DIR, exist_ok=True)
     local_path = os.path.join(MODELS_DIR, filename)
     if not os.path.exists(local_path):
-        size_hint = "~200MB" if "fp32" in filename else "~100MB"
-        print(f"Downloading {filename} ({size_hint})...")
+        hint = f" ({size_hint})" if size_hint else ""
+        print(f"Downloading {filename}{hint}...")
         downloaded = hf_hub_download(repo_id=repo, filename=filename, local_dir=MODELS_DIR)
         if downloaded != local_path and not os.path.exists(local_path):
             import shutil
@@ -37,12 +45,11 @@ def _download(repo: str, filename: str) -> str:
     return local_path
 
 
-def _simplify_gpu_model(src_path: str) -> str:
-    """Constant-fold the GPU model on first use to reduce CPU/GPU Memcpy nodes."""
-    dst_path = os.path.join(MODELS_DIR, GPU_MODEL_FILE_SIM)
+def _simplify_lama(src_path: str) -> str:
+    dst_path = os.path.join(MODELS_DIR, _LAMA_FILE_SIM)
     if os.path.exists(dst_path):
         return dst_path
-    print("Optimising model (one-time, takes ~30s)...")
+    print("Optimising LaMa model (one-time, ~30s)...")
     import onnx
     from onnxsim import simplify
     model = onnx.load(src_path)
@@ -58,47 +65,65 @@ def _simplify_gpu_model(src_path: str) -> str:
     return src_path
 
 
-def load_session() -> InpaintSession:
-    cuda_available = "CUDAExecutionProvider" in ort.get_available_providers()
+def _cuda_available() -> bool:
+    return "CUDAExecutionProvider" in ort.get_available_providers()
 
-    if cuda_available:
-        base_path = _download(GPU_MODEL_REPO, GPU_MODEL_FILE)
-        model_path = _simplify_gpu_model(base_path)
-        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+def _session_opts() -> ort.SessionOptions:
+    opts = ort.SessionOptions()
+    opts.log_severity_level = 3  # ERROR only — suppress W-level Memcpy/graph warnings
+    return opts
+
+
+def load_session(model_type: ModelType = ModelType.LAMA) -> InpaintSession:
+    cuda = _cuda_available()
+    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if cuda else ["CPUExecutionProvider"]
+    opts = _session_opts()
+
+    if model_type == ModelType.MIGAN:
+        path = _download(_MIGAN_REPO, _MIGAN_FILE, "~26MB")
+        session = ort.InferenceSession(path, sess_options=opts, providers=providers)
+        active = session.get_providers()[0]
+        print(f"ONNX Runtime using: {active} (MI-GAN pipeline)")
+        return InpaintSession(session=session, model_type=ModelType.MIGAN)
+
+    # LaMa
+    if cuda:
+        base = _download(_LAMA_REPO, _LAMA_FILE, "~200MB")
+        path = _simplify_lama(base)
         use_bgr = False
-        output_scale = 1.0
     else:
-        model_path = _download(CPU_MODEL_REPO, CPU_MODEL_FILE)
-        providers = ["CPUExecutionProvider"]
+        path = _download("opencv/inpainting_lama", "inpainting_lama_2025jan.onnx", "~100MB")
         use_bgr = True
-        output_scale = 1.0
 
-    session = ort.InferenceSession(model_path, providers=providers)
+    session = ort.InferenceSession(path, sess_options=opts, providers=providers)
     active = session.get_providers()[0]
-    model_label = "fp32/RGB" if cuda_available else "quantized/BGR"
-    print(f"ONNX Runtime using: {active} ({model_label} model)")
-    return InpaintSession(session=session, use_bgr=use_bgr, output_scale=output_scale)
+    label = "fp32/RGB" if cuda else "quantized/BGR"
+    print(f"ONNX Runtime using: {active} (LaMa {label})")
+    return InpaintSession(session=session, model_type=ModelType.LAMA, use_bgr=use_bgr)
 
 
 def run_inference(info: InpaintSession, image: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """
-    image: float32 [1, 3, H, W] RGB in [0, 1]
-    mask:  float32 [1, 1, H, W], 1.0 = region to inpaint
+    LaMa path:
+      image: float32 [1, 3, H, W] RGB in [0, 1]
+      mask:  float32 [1, 1, H, W], 1.0 = region to inpaint
+      returns: float32 [3, H, W] RGB in [0, 255]
 
-    Returns float32 [3, H, W] RGB in [0, 255]
+    MI-GAN path:
+      image: uint8 [1, 3, H, W] RGB
+      mask:  uint8 [1, 1, H, W], 0 = region to inpaint, 255 = keep
+      returns: uint8 [3, H, W] RGB
     """
+    if info.model_type == ModelType.MIGAN:
+        output = info.session.run(None, {"image": image, "mask": mask})[0]
+        return output[0] if output.ndim == 4 else output
+
     if info.use_bgr:
-        image = image[:, ::-1, :, :]  # RGB → BGR
-
-    outputs = info.session.run(None, {"image": image, "mask": mask})
-    output = outputs[0]
-
+        image = image[:, ::-1, :, :]
+    output = info.session.run(None, {"image": image, "mask": mask})[0]
     if output.ndim == 4:
-        output = output[0]  # [1, 3, H, W] → [3, H, W]
-
-    output = output * info.output_scale  # normalise to [0, 255]
-
+        output = output[0]
     if info.use_bgr:
-        output = output[::-1]  # BGR → RGB
-
+        output = output[::-1]
     return output
