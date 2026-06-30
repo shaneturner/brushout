@@ -242,7 +242,9 @@ class Canvas(QGraphicsView):
 
     def wheelEvent(self, event):
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.scale(factor, factor)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
 
     # ── Properties ───────────────────────────────────────────────────────
 
