@@ -44,7 +44,7 @@ jobs:
         run: iscc installer.iss
 
       - name: Upload installer artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Brushout-Windows-Setup
           path: Output/Brushout-Setup.exe
@@ -122,10 +122,10 @@ jobs:
           EOF
           chmod +x AppDir/AppRun
 
-          ARCH=x86_64 ./appimagetool AppDir Brushout-x86_64.AppImage
+          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool AppDir Brushout-x86_64.AppImage
 
       - name: Upload AppImage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Brushout-Linux
           path: Brushout-x86_64.AppImage
@@ -138,13 +138,13 @@ jobs:
       contents: write
     steps:
       - name: Download Windows installer
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: Brushout-Windows-Setup
           path: release/
 
       - name: Download Linux AppImage
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: Brushout-Linux
           path: release/
