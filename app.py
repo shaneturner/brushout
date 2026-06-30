@@ -242,9 +242,16 @@ class Canvas(QGraphicsView):
 
     def wheelEvent(self, event):
         factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
-        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        cursor_pos = event.position().toPoint()
+        scene_pos = self.mapToScene(cursor_pos)
         self.scale(factor, factor)
-        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
+        new_vp = self.mapFromScene(scene_pos)
+        self.horizontalScrollBar().setValue(
+            self.horizontalScrollBar().value() + new_vp.x() - cursor_pos.x()
+        )
+        self.verticalScrollBar().setValue(
+            self.verticalScrollBar().value() + new_vp.y() - cursor_pos.y()
+        )
 
     # ── Properties ───────────────────────────────────────────────────────
 
