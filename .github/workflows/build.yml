@@ -1,0 +1,161 @@
+name: Build Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Install PyInstaller
+        run: uv pip install pyinstaller
+
+      - name: Cache models
+        uses: actions/cache@v6
+        with:
+          path: models/
+          key: models-v1
+
+      - name: Download models
+        run: uv run python download_models.py
+
+      - name: Build with PyInstaller
+        run: uv run pyinstaller brushout.spec
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        run: iscc installer.iss
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Brushout-Windows-Setup
+          path: Output/Brushout-Setup.exe
+
+  build-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Install PyInstaller
+        run: uv pip install pyinstaller
+
+      - name: Cache models
+        uses: actions/cache@v6
+        with:
+          path: models/
+          key: models-v1
+
+      - name: Download models
+        run: uv run python download_models.py
+
+      - name: Install Qt platform dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
+            libxkbcommon-x11-0 libgl1 libglib2.0-0
+
+      - name: Build with PyInstaller
+        run: uv run pyinstaller brushout.spec
+
+      - name: Download appimagetool
+        run: |
+          wget -q -O appimagetool \
+            https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+
+      - name: Create AppImage
+        run: |
+          mkdir -p AppDir/usr/bin
+          cp -r dist/Brushout/* AppDir/usr/bin/
+
+          cat > AppDir/brushout.desktop << 'EOF'
+          [Desktop Entry]
+          Name=Brushout
+          Exec=Brushout
+          Icon=brushout
+          Type=Application
+          Categories=Graphics;
+          EOF
+
+          uv run python -c "
+          from PIL import Image, ImageDraw
+          img = Image.new('RGBA', (256, 256), (30, 30, 30, 255))
+          d = ImageDraw.Draw(img)
+          d.ellipse([40, 40, 216, 216], fill=(80, 160, 240, 255))
+          img.save('AppDir/brushout.png')
+          "
+
+          cat > AppDir/AppRun << 'EOF'
+          #!/bin/bash
+          HERE="$(dirname "$(readlink -f "$0")")"
+          export LD_LIBRARY_PATH="$HERE/usr/bin:$LD_LIBRARY_PATH"
+          exec "$HERE/usr/bin/Brushout" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+
+          ARCH=x86_64 ./appimagetool AppDir Brushout-x86_64.AppImage
+
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Brushout-Linux
+          path: Brushout-x86_64.AppImage
+
+  publish:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows installer
+        uses: actions/download-artifact@v4
+        with:
+          name: Brushout-Windows-Setup
+          path: release/
+
+      - name: Download Linux AppImage
+        uses: actions/download-artifact@v4
+        with:
+          name: Brushout-Linux
+          path: release/
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create ${{ github.ref_name }} \
+            release/Brushout-Setup.exe \
+            release/Brushout-x86_64.AppImage \
+            --generate-notes \
+            --title "Brushout ${{ github.ref_name }}" \
+            --repo ${{ github.repository }}

@@ -1,4 +1,5 @@
 import os
+import sys
 from dataclasses import dataclass
 from enum import Enum
 import numpy as np
@@ -7,7 +8,10 @@ from huggingface_hub import hf_hub_download
 
 ort.set_default_logger_severity(3)  # suppress W-level messages from the global C++ logger
 
-MODELS_DIR = os.path.join(os.path.dirname(__file__), "models")
+if getattr(sys, 'frozen', False):
+    MODELS_DIR = os.path.join(os.path.dirname(sys.executable), "models")
+else:
+    MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
 
 class ModelType(Enum):

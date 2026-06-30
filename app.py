@@ -500,7 +500,7 @@ class Canvas(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Object Remover")
+        self.setWindowTitle("Brushout")
         self.resize(1100, 750)
 
         self._sessions: dict[ModelType, object] = {}
@@ -677,8 +677,8 @@ class MainWindow(QMainWindow):
 
 def _setup_logging(log_dir: str, level: str) -> None:
     os.makedirs(log_dir, exist_ok=True)
-    out_path = os.path.join(log_dir, "remover.log")
-    err_path = os.path.join(log_dir, "remover.err.log")
+    out_path = os.path.join(log_dir, "brushout.log")
+    err_path = os.path.join(log_dir, "brushout.err.log")
 
     # Truncate on startup so each run starts clean
     open(out_path, "w").close()
@@ -695,13 +695,13 @@ def _setup_logging(log_dir: str, level: str) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Object Remover")
+    parser = argparse.ArgumentParser(description="Brushout — AI-powered object removal")
     parser.add_argument(
         "--log",
         metavar="DIR",
         nargs="?",
-        const=os.path.expanduser("~/.local/share/remover/logs"),
-        help="Write logs to DIR (default: ~/.local/share/remover/logs)",
+        const=os.path.expanduser("~/.local/share/brushout/logs"),
+        help="Write logs to DIR (default: ~/.local/share/brushout/logs)",
     )
     parser.add_argument(
         "--log-level",
@@ -716,7 +716,7 @@ def main():
         _setup_logging(args.log, args.log_level)
 
     app = QApplication([sys.argv[0]] + qt_args)
-    app.setApplicationName("Object Remover")
+    app.setApplicationName("Brushout")
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
