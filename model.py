@@ -5,6 +5,8 @@ import numpy as np
 import onnxruntime as ort
 from huggingface_hub import hf_hub_download
 
+ort.set_default_logger_severity(3)  # suppress W-level messages from the global C++ logger
+
 MODELS_DIR = os.path.join(os.path.dirname(__file__), "models")
 
 
