@@ -1,5 +1,5 @@
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 
 MODEL_INPUT_SIZE = 512
 MIN_CROP_PADDING = 32
@@ -80,7 +80,17 @@ def inpaint(
     result_pil = Image.fromarray(result_hwc, "RGB")
     result_pil = result_pil.resize((crop_w, crop_h), Image.LANCZOS)
 
+    # Composite: only replace masked pixels, feathered at edges to avoid a
+    # hard seam. Outside the mask stays pixel-perfect original.
+    comp_mask = Image.fromarray(crop_mask, "L").resize((crop_w, crop_h), Image.NEAREST)
+    comp_mask = comp_mask.filter(ImageFilter.GaussianBlur(radius=3))
+    alpha = np.array(comp_mask, dtype=np.float32) / 255.0  # [0, 1]
+
+    result_arr = np.array(result_pil, dtype=np.float32)
+    orig_arr   = crop_img.astype(np.float32)
+    blended = orig_arr + alpha[..., None] * (result_arr - orig_arr)
+
     output_arr = img_arr.copy()
-    output_arr[y0p:y1p, x0p:x1p] = np.array(result_pil)
+    output_arr[y0p:y1p, x0p:x1p] = np.clip(blended, 0, 255).astype(np.uint8)
 
     return Image.fromarray(output_arr)
