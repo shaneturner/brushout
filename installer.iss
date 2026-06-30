@@ -1,6 +1,6 @@
 [Setup]
 AppName=Brushout
-AppVersion=1.0.0
+AppVersion=1.0.1
 AppPublisher=Shane Turner
 DefaultDirName={userappdata}\Brushout
 DefaultGroupName=Brushout
