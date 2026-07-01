@@ -10,14 +10,15 @@ Compression=lzma2/max
 SolidCompression=yes
 PrivilegesRequired=lowest
 WizardStyle=modern
+SetupIconFile=brushout.ico
 MinVersion=10.0
 
 [Files]
 Source: "dist\Brushout\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\Brushout"; Filename: "{app}\Brushout.exe"
-Name: "{commondesktop}\Brushout"; Filename: "{app}\Brushout.exe"; Tasks: desktopicon
+Name: "{userprograms}\Brushout"; Filename: "{app}\Brushout.exe"
+Name: "{userdesktop}\Brushout"; Filename: "{app}\Brushout.exe"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"

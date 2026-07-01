@@ -2,7 +2,7 @@
 
 Paint over an object in a photo and it disappears. Brushout uses AI inpainting to fill the selected region with plausible background.
 
-![Brushout screenshot placeholder](docs/screenshot.png)
+![Before and after: person in chicken costume removed from wedding photo](beach-brushout.jpg)
 
 ## How it works
 

@@ -106,13 +106,7 @@ jobs:
           Categories=Graphics;
           EOF
 
-          uv run python -c "
-          from PIL import Image, ImageDraw
-          img = Image.new('RGBA', (256, 256), (30, 30, 30, 255))
-          d = ImageDraw.Draw(img)
-          d.ellipse([40, 40, 216, 216], fill=(80, 160, 240, 255))
-          img.save('AppDir/brushout.png')
-          "
+          cp brushout.png AppDir/brushout.png
 
           cat > AppDir/AppRun << 'EOF'
           #!/bin/bash
