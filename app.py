@@ -506,6 +506,7 @@ class MainWindow(QMainWindow):
         self._sessions: dict[ModelType, object] = {}
         self._active_model = ModelType.LAMA
         self._model_btn: QPushButton | None = None
+        self._remove_btn: QPushButton | None = None
         self._canvas = Canvas(self)
         self.setCentralWidget(self._canvas)
 
@@ -565,16 +566,32 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
 
         self._model_btn = QPushButton(self._model_label())
-        self._model_btn.setToolTip("Switch inpainting model")
+        self._model_btn.setToolTip("Click to switch inpainting model")
         self._model_btn.clicked.connect(self._toggle_model)
+        self._model_btn.setStyleSheet("")
         tb.addWidget(self._model_btn)
 
         tb.addSeparator()
 
-        remove_act = QAction("Remove Object", self)
-        remove_act.setShortcut("Return")
-        remove_act.triggered.connect(self._run_inpaint)
-        tb.addAction(remove_act)
+        self._remove_btn = QPushButton("Remove Object  ↵")
+        self._remove_btn.setShortcut("Return")
+        self._remove_btn.clicked.connect(self._run_inpaint)
+        self._remove_btn.setToolTip("Remove the masked region (Enter)")
+        self._remove_btn.setStyleSheet("""
+            QPushButton {
+                padding: 4px 16px;
+                border: none;
+                border-radius: 4px;
+                background: #3d6b3d;
+                color: #ddd;
+                font-weight: bold;
+                font-size: 13px;
+            }
+            QPushButton:hover { background: #4a804a; color: #fff; }
+            QPushButton:pressed { background: #2f542f; }
+            QPushButton:disabled { background: #2a2a2a; color: #666; }
+        """)
+        tb.addWidget(self._remove_btn)
 
     # ── Model preloading ─────────────────────────────────────────────────
 
@@ -593,8 +610,8 @@ class MainWindow(QMainWindow):
 
     def _model_label(self) -> str:
         return {
-            ModelType.LAMA:  "Model: LaMa",
-            ModelType.MIGAN: "Model: MI-GAN",
+            ModelType.LAMA:  "⇄  LaMa",
+            ModelType.MIGAN: "⇄  MI-GAN",
         }[self._active_model]
 
     def _toggle_model(self):
