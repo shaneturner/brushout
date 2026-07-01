@@ -498,6 +498,9 @@ class Canvas(QGraphicsView):
 
 
 class MainWindow(QMainWindow):
+    _model_loaded = Signal(object, object)   # model_type, session — safe to emit from any thread
+    _model_load_failed = Signal(object, str)  # model_type, error message
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Brushout")
@@ -512,6 +515,8 @@ class MainWindow(QMainWindow):
 
         self._build_toolbar()
         self._status = QLabel("Open an image to get started.")
+        self._model_loaded.connect(self._store_session)
+        self._model_load_failed.connect(self._on_model_load_failed)
         threading.Thread(target=self._preload_models, daemon=True).start()
         self.statusBar().addWidget(self._status)
         self._canvas.image_dropped.connect(self._on_image_dropped)
@@ -599,12 +604,22 @@ class MainWindow(QMainWindow):
         for model_type in (ModelType.LAMA, ModelType.MIGAN):
             try:
                 session = load_session(model_type)
-                QTimer.singleShot(0, lambda s=session, t=model_type: self._store_session(t, s))
+                self._model_loaded.emit(model_type, session)
             except Exception as e:
                 print(f"Preload failed for {model_type.value}: {e}")
 
     def _store_session(self, model_type: ModelType, session):
         self._sessions[model_type] = session
+        if model_type == self._active_model:
+            self._remove_btn.setEnabled(True)
+            if self._canvas.has_image and self._canvas.has_mask:
+                self._do_inpaint()
+
+    def _on_model_load_failed(self, model_type: ModelType, message: str):
+        if model_type == self._active_model:
+            self._remove_btn.setEnabled(True)
+            QMessageBox.critical(self, "Model Load Error", message)
+            self._status.setText("Error loading model.")
 
     # ── Model selection ──────────────────────────────────────────────────
 
@@ -672,13 +687,22 @@ class MainWindow(QMainWindow):
         if self._active_model not in self._sessions:
             model_name = self._model_label().replace("Model: ", "")
             self._status.setText(f"Loading {model_name} model...")
-            QApplication.processEvents()
-            try:
-                self._sessions[self._active_model] = load_session(self._active_model)
-            except Exception as e:
-                QMessageBox.critical(self, "Model Load Error", str(e))
-                return
+            self._remove_btn.setEnabled(False)
+            model_type = self._active_model
 
+            def worker():
+                try:
+                    session = load_session(model_type)
+                    self._model_loaded.emit(model_type, session)
+                except Exception as e:
+                    self._model_load_failed.emit(model_type, str(e))
+
+            threading.Thread(target=worker, daemon=True).start()
+            return
+
+        self._do_inpaint()
+
+    def _do_inpaint(self):
         self._status.setText("Removing object...")
         QApplication.processEvents()
 

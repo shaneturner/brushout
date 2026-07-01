@@ -7,7 +7,11 @@ a = Analysis(
     pathex=['.'],
     binaries=[],
     datas=[
-        ('models/*.onnx', 'models'),
+        # GPU-only LaMa variants (lama_fp32*.onnx) are deliberately left out — packaged
+        # builds always run on CPU (see model._cuda_available), so bundling them would
+        # add ~400MB for models that can never be loaded.
+        ('models/inpainting_lama_2025jan.onnx', 'models'),
+        ('models/migan_pipeline_v2.onnx', 'models'),
     ],
     hiddenimports=[
         'onnxruntime.capi._pybind_state',

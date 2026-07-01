@@ -1,4 +1,5 @@
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from enum import Enum
@@ -72,7 +73,26 @@ def _simplify_lama(src_path: str) -> str:
 
 
 def _cuda_available() -> bool:
-    return "CUDAExecutionProvider" in ort.get_available_providers()
+    # Packaged builds never bundle the CUDA/cuDNN runtime DLLs onnxruntime-gpu needs
+    # (~2GB — cuBLAS, cuDNN, cuFFT, cuRAND — not shipped by onnxruntime-gpu itself and
+    # deliberately excluded from the installer for size). Always use CPU when frozen.
+    if getattr(sys, 'frozen', False):
+        return False
+
+    # onnxruntime-gpu always lists CUDAExecutionProvider in get_available_providers(),
+    # even on machines with no NVIDIA driver — it reports what was compiled in, not
+    # what actually works. Probe for a real driver via nvidia-smi instead, since
+    # letting onnxruntime try (and fail) to load the CUDA/cuDNN DLLs can hang for a
+    # long time on Windows.
+    if "CUDAExecutionProvider" not in ort.get_available_providers():
+        return False
+    try:
+        result = subprocess.run(
+            ["nvidia-smi"], capture_output=True, timeout=3,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def _session_opts() -> ort.SessionOptions:
@@ -82,13 +102,22 @@ def _session_opts() -> ort.SessionOptions:
 
 
 def load_session(model_type: ModelType = ModelType.LAMA) -> InpaintSession:
-    cuda = _cuda_available()
+    return _load_session(model_type, cuda=_cuda_available())
+
+
+def _load_session(model_type: ModelType, cuda: bool) -> InpaintSession:
     providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if cuda else ["CPUExecutionProvider"]
     opts = _session_opts()
 
     if model_type == ModelType.MIGAN:
         path = _download(_MIGAN_REPO, _MIGAN_FILE, "~26MB")
-        session = ort.InferenceSession(path, sess_options=opts, providers=providers)
+        try:
+            session = ort.InferenceSession(path, sess_options=opts, providers=providers)
+        except Exception:
+            if not cuda:
+                raise
+            print("CUDA session creation failed, falling back to CPU.")
+            return _load_session(model_type, cuda=False)
         active = session.get_providers()[0]
         print(f"ONNX Runtime using: {active} (MI-GAN pipeline)")
         return InpaintSession(session=session, model_type=ModelType.MIGAN)
@@ -102,7 +131,13 @@ def load_session(model_type: ModelType = ModelType.LAMA) -> InpaintSession:
         path = _download("opencv/inpainting_lama", "inpainting_lama_2025jan.onnx", "~100MB")
         use_bgr = True
 
-    session = ort.InferenceSession(path, sess_options=opts, providers=providers)
+    try:
+        session = ort.InferenceSession(path, sess_options=opts, providers=providers)
+    except Exception:
+        if not cuda:
+            raise
+        print("CUDA session creation failed, falling back to CPU.")
+        return _load_session(model_type, cuda=False)
     active = session.get_providers()[0]
     label = "fp32/RGB" if cuda else "quantized/BGR"
     print(f"ONNX Runtime using: {active} (LaMa {label})")
